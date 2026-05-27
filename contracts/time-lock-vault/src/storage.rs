@@ -54,12 +54,6 @@ pub fn remove_deposit(env: &Env, depositor: &Address) {
     env.storage().persistent().remove(&key);
 }
 
-/// Returns `true` if a deposit record exists for `depositor`.
-pub fn has_deposit(env: &Env, depositor: &Address) -> bool {
-    let key = VaultKey::Deposit(depositor.clone());
-    env.storage().persistent().has(&key)
-}
-
 // ----------------------------------------------------------------
 //  Admin helpers
 // ----------------------------------------------------------------

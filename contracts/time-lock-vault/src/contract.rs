@@ -94,7 +94,7 @@ impl TimeLockVault {
         }
 
         // --- Duplicate deposit guard ---
-        if storage::has_deposit(&env, &depositor) {
+        if storage::get_deposit_readonly(&env, &depositor).is_some() {
             return Err(VaultError::DepositAlreadyExists);
         }
 
