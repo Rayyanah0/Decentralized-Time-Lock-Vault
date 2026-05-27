@@ -11,8 +11,10 @@ use crate::types::{VaultEntry, VaultKey};
 /// Minimum ledger TTL threshold before we bump (≈ 30 days at 5s/ledger).
 pub const BUMP_THRESHOLD: u32 = 518_400;
 
-/// Target TTL after a bump (≈ 1 year at 5s/ledger).
-pub const BUMP_TARGET: u32 = 6_307_200;
+/// Target TTL after a bump (≈ 5.2 years at 5s/ledger).
+/// Must exceed MAX_LOCK_DURATION_SECS in ledger units (157_788_000s / 5s = 31_557_600 ledgers)
+/// so a max-duration deposit cannot expire before its unlock time.
+pub const BUMP_TARGET: u32 = 33_000_000;
 
 // ----------------------------------------------------------------
 //  Deposit helpers
@@ -54,12 +56,6 @@ pub fn remove_deposit(env: &Env, depositor: &Address) {
     env.storage().persistent().remove(&key);
 }
 
-/// Returns `true` if a deposit record exists for `depositor`.
-pub fn has_deposit(env: &Env, depositor: &Address) -> bool {
-    let key = VaultKey::Deposit(depositor.clone());
-    env.storage().persistent().has(&key)
-}
-
 // ----------------------------------------------------------------
 //  Admin helpers
 // ----------------------------------------------------------------
@@ -94,9 +90,46 @@ pub fn get_pending_admin(env: &Env) -> Option<Address> {
 
 /// Remove the pending admin entry (after acceptance or cancellation).
 pub fn remove_pending_admin(env: &Env) {
+    env.storage().persistent().remove(&VaultKey::PendingAdmin);
+}
+
+// ----------------------------------------------------------------
+//  Runtime limits helpers
+// ----------------------------------------------------------------
+
+pub fn set_max_deposit(env: &Env, v: i128) {
+    env.storage().persistent().set(&VaultKey::MaxDeposit, &v);
+    env.storage().persistent().extend_ttl(&VaultKey::MaxDeposit, BUMP_THRESHOLD, BUMP_TARGET);
+}
+
+pub fn get_max_deposit(env: &Env) -> Option<i128> {
+    env.storage().persistent().get(&VaultKey::MaxDeposit)
+}
+
+pub fn set_max_lock_secs(env: &Env, v: u64) {
+    env.storage().persistent().set(&VaultKey::MaxLockSecs, &v);
+    env.storage().persistent().extend_ttl(&VaultKey::MaxLockSecs, BUMP_THRESHOLD, BUMP_TARGET);
+}
+
+pub fn get_max_lock_secs(env: &Env) -> Option<u64> {
+    env.storage().persistent().get(&VaultKey::MaxLockSecs)
+}
+
+// ----------------------------------------------------------------
+//  Fee recipient helpers
+// ----------------------------------------------------------------
+
+pub fn set_fee_recipient(env: &Env, recipient: &Address) {
     env.storage()
         .persistent()
-        .remove(&VaultKey::PendingAdmin);
+        .set(&VaultKey::FeeRecipient, recipient);
+    env.storage()
+        .persistent()
+        .extend_ttl(&VaultKey::FeeRecipient, BUMP_THRESHOLD, BUMP_TARGET);
+}
+
+pub fn get_fee_recipient(env: &Env) -> Option<Address> {
+    env.storage().persistent().get(&VaultKey::FeeRecipient)
 }
 
 // ----------------------------------------------------------------
