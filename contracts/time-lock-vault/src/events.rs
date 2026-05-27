@@ -1,8 +1,16 @@
-use soroban_sdk::{Address, Env, Symbol, symbol_short};
+use soroban_sdk::{symbol_short, Address, Env, Symbol};
 
-pub fn deposit(env: &Env, depositor: &Address, deposit_id: u32, token: &Address, amount: i128, unlock_time: u64) {
+pub fn deposit(
+    env: &Env,
+    depositor: &Address,
+    deposit_id: u32,
+    token: &Address,
+    amount: i128,
+    unlock_time: u64,
+) {
     let topics = (symbol_short!("deposit"), depositor.clone(), token.clone());
-    env.events().publish(topics, (deposit_id, amount, unlock_time));
+    env.events()
+        .publish(topics, (deposit_id, amount, unlock_time));
 }
 
 pub fn withdraw(env: &Env, depositor: &Address, deposit_id: u32, token: &Address, amount: i128) {
@@ -23,7 +31,8 @@ pub fn emergency_withdraw(
         admin.clone(),
         depositor.clone(),
     );
-    env.events().publish(topics, (deposit_id, token.clone(), amount));
+    env.events()
+        .publish(topics, (deposit_id, token.clone(), amount));
 }
 
 pub fn admin_transfer_initiated(env: &Env, current_admin: &Address, pending_admin: &Address) {

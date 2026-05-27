@@ -2,8 +2,7 @@ use soroban_sdk::{contract, contractimpl, token, Address, Env, Vec};
 
 use crate::{
     errors::VaultError,
-    events,
-    storage,
+    events, storage,
     types::{VaultEntry, MAX_DEPOSIT_AMOUNT, MAX_LOCK_DURATION_SECS},
 };
 
@@ -80,8 +79,8 @@ impl TimeLockVault {
     pub fn withdraw(env: Env, depositor: Address, deposit_id: u32) -> Result<(), VaultError> {
         depositor.require_auth();
 
-        let entry = storage::get_deposit(&env, &depositor, deposit_id)
-            .ok_or(VaultError::NoDepositFound)?;
+        let entry =
+            storage::get_deposit(&env, &depositor, deposit_id).ok_or(VaultError::NoDepositFound)?;
 
         let now = env.ledger().timestamp();
         if now < entry.unlock_time {
@@ -91,11 +90,7 @@ impl TimeLockVault {
         storage::remove_deposit(&env, &depositor, deposit_id);
 
         let token_client = token::Client::new(&env, &entry.token);
-        token_client.transfer(
-            &env.current_contract_address(),
-            &depositor,
-            &entry.amount,
-        );
+        token_client.transfer(&env.current_contract_address(), &depositor, &entry.amount);
 
         events::withdraw(&env, &depositor, deposit_id, &entry.token, entry.amount);
 
@@ -119,19 +114,22 @@ impl TimeLockVault {
             return Err(VaultError::Unauthorized);
         }
 
-        let entry = storage::get_deposit(&env, &depositor, deposit_id)
-            .ok_or(VaultError::NoDepositFound)?;
+        let entry =
+            storage::get_deposit(&env, &depositor, deposit_id).ok_or(VaultError::NoDepositFound)?;
 
         storage::remove_deposit(&env, &depositor, deposit_id);
 
         let token_client = token::Client::new(&env, &entry.token);
-        token_client.transfer(
-            &env.current_contract_address(),
-            &depositor,
-            &entry.amount,
-        );
+        token_client.transfer(&env.current_contract_address(), &depositor, &entry.amount);
 
-        events::emergency_withdraw(&env, &admin, &depositor, deposit_id, &entry.token, entry.amount);
+        events::emergency_withdraw(
+            &env,
+            &admin,
+            &depositor,
+            deposit_id,
+            &entry.token,
+            entry.amount,
+        );
 
         Ok(())
     }
@@ -140,11 +138,7 @@ impl TimeLockVault {
     //  Admin: Two-Step Admin Transfer
     // ----------------------------------------------------------------
 
-    pub fn transfer_admin(
-        env: Env,
-        admin: Address,
-        new_admin: Address,
-    ) -> Result<(), VaultError> {
+    pub fn transfer_admin(env: Env, admin: Address, new_admin: Address) -> Result<(), VaultError> {
         admin.require_auth();
         let stored_admin = storage::get_admin(&env).ok_or(VaultError::Unauthorized)?;
         if admin != stored_admin {
@@ -183,7 +177,9 @@ impl TimeLockVault {
         if admin != stored_admin {
             return Err(VaultError::Unauthorized);
         }
-        env.storage().persistent().remove(&crate::types::VaultKey::Admin);
+        env.storage()
+            .persistent()
+            .remove(&crate::types::VaultKey::Admin);
         storage::remove_pending_admin(&env);
         events::admin_renounced(&env, &admin);
         Ok(())
@@ -210,11 +206,7 @@ impl TimeLockVault {
             None => 0,
             Some(entry) => {
                 let now = env.ledger().timestamp();
-                if now >= entry.unlock_time {
-                    0
-                } else {
-                    entry.unlock_time - now
-                }
+                entry.unlock_time.saturating_sub(now)
             }
         }
     }

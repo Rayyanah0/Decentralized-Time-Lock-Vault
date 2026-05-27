@@ -27,11 +27,7 @@ pub fn next_deposit_id(env: &Env, depositor: &Address) -> u32 {
 /// Returns all active deposit IDs for `depositor`.
 pub fn get_deposit_ids(env: &Env, depositor: &Address) -> Vec<u32> {
     let counter_key = VaultKey::DepositCounter(depositor.clone());
-    let count: u32 = env
-        .storage()
-        .persistent()
-        .get(&counter_key)
-        .unwrap_or(0);
+    let count: u32 = env.storage().persistent().get(&counter_key).unwrap_or(0);
 
     let mut ids = Vec::new(env);
     for id in 0..count {
@@ -105,9 +101,7 @@ pub fn get_pending_admin(env: &Env) -> Option<Address> {
 }
 
 pub fn remove_pending_admin(env: &Env) {
-    env.storage()
-        .persistent()
-        .remove(&VaultKey::PendingAdmin);
+    env.storage().persistent().remove(&VaultKey::PendingAdmin);
 }
 
 // ----------------------------------------------------------------
