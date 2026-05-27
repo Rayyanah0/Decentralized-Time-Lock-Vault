@@ -236,6 +236,7 @@ Use `offset=0, limit=N` for the first page, then increment `offset` by `N` for s
 | Safe admin transfer | Two-step transfer prevents accidental key loss |
 | TTL management | Persistent entries bumped to ~1 year on every write; view functions skip TTL bump |
 | No testutils in production | `features = ["testutils"]` only in `[dev-dependencies]` |
+| Initialize front-running | `initialize()` has no on-chain guard against a race: an attacker who observes the deploy transaction in the mempool can call `initialize` first with their own address. **Mitigation:** always call `initialize` in the same transaction as `deploy` (atomic deploy+init) so no intermediate state is visible. The deploy script does this by default. |
 
 ---
 
