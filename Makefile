@@ -55,3 +55,13 @@ deploy-testnet: optimize
 ## Show raw WASM size
 size: build
 	@ls -lh $(WASM_OUT)
+
+## Fail if optimized WASM exceeds MAX_WASM_BYTES (default 65536 = 64 KB)
+MAX_WASM_BYTES ?= 65536
+check-wasm-size: optimize
+	@ACTUAL=$$(wc -c < $(OPTIMIZED)); \
+	echo "Optimized WASM size: $${ACTUAL} bytes (limit: $(MAX_WASM_BYTES))"; \
+	if [ "$$ACTUAL" -gt "$(MAX_WASM_BYTES)" ]; then \
+		echo "ERROR: WASM too large: $${ACTUAL} bytes exceeds limit of $(MAX_WASM_BYTES) bytes"; \
+		exit 1; \
+	fi
