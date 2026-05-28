@@ -197,6 +197,10 @@ impl TimeLockVault {
         depositor: Address,
     ) -> Result<(), VaultError> {
         admin.require_auth();
+        storage::require_admin(&env, &admin)?;
+
+        storage::remove_deposit(&env, &depositor, deposit_id);
+        // --- Load deposit without bumping TTL; the entry will be deleted ---
 
         let stored_admin = storage::get_admin(&env).ok_or(VaultError::Unauthorized)?;
         if admin != stored_admin {
@@ -329,10 +333,7 @@ impl TimeLockVault {
 
     pub fn cancel_transfer_admin(env: Env, admin: Address) -> Result<(), VaultError> {
         admin.require_auth();
-        let stored_admin = storage::get_admin(&env).ok_or(VaultError::Unauthorized)?;
-        if admin != stored_admin {
-            return Err(VaultError::Unauthorized);
-        }
+        storage::require_admin(&env, &admin)?;
         storage::remove_pending_admin(&env);
         events::admin_transfer_cancelled(&env, &admin);
         Ok(())
@@ -340,10 +341,7 @@ impl TimeLockVault {
 
     pub fn renounce_admin(env: Env, admin: Address) -> Result<(), VaultError> {
         admin.require_auth();
-        let stored_admin = storage::get_admin(&env).ok_or(VaultError::Unauthorized)?;
-        if admin != stored_admin {
-            return Err(VaultError::Unauthorized);
-        }
+        storage::require_admin(&env, &admin)?;
         env.storage()
             .persistent()
             .remove(&crate::types::VaultKey::Admin);
