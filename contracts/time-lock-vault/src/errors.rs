@@ -25,4 +25,11 @@ pub enum VaultError {
 
     /// `batch_emergency_withdraw` was called with more than `MAX_BATCH_SIZE` depositors.
     BatchTooLarge = 12,
+
+    /// `initialize` was called on an already-initialized contract.
+    AlreadyInitialized = 13,
+
+    /// `renew_deposit` or `extend_lock` was called with a new_unlock_time that would
+    /// not increase the current lock (equal or earlier).
+    LockWouldNotIncrease = 14,
 }
