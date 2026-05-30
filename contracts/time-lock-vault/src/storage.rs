@@ -211,3 +211,25 @@ pub fn get_depositors_page(env: &Env, offset: u32, limit: u32) -> Vec<Address> {
     }
     page
 }
+
+// ----------------------------------------------------------------
+//  Initialized flag
+// ----------------------------------------------------------------
+
+/// Mark the contract as initialized (called once during initialize()).
+pub fn set_initialized(env: &Env) {
+    env.storage()
+        .persistent()
+        .set(&VaultKey::Initialized, &true);
+    env.storage()
+        .persistent()
+        .extend_ttl(&VaultKey::Initialized, BUMP_THRESHOLD, BUMP_TARGET);
+}
+
+/// Returns true if initialize() has ever been called.
+pub fn is_initialized(env: &Env) -> bool {
+    env.storage()
+        .persistent()
+        .get::<VaultKey, bool>(&VaultKey::Initialized)
+        .unwrap_or(false)
+}
