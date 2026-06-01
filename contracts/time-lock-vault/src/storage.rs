@@ -1,6 +1,6 @@
 use soroban_sdk::{Address, Env, Vec};
 
-use crate::types::{VaultEntry, VaultKey};
+use crate::types::{VaultEntry, VaultKey, LedgerVaultEntry};
 
 pub const BUMP_THRESHOLD: u32 = 518_400;
 pub const BUMP_TARGET: u32 = 33_000_000;
@@ -62,6 +62,28 @@ pub fn get_deposit_readonly(env: &Env, depositor: &Address, deposit_id: u32) -> 
 
 pub fn remove_deposit(env: &Env, depositor: &Address, deposit_id: u32) {
     let key = VaultKey::Deposit(depositor.clone(), deposit_id);
+    env.storage().persistent().remove(&key);
+}
+
+// ----------------------------------------------------------------
+//  Ledger-based deposit helpers
+// ----------------------------------------------------------------
+
+pub fn set_deposit_by_ledger(env: &Env, depositor: &Address, deposit_id: u32, entry: &LedgerVaultEntry) {
+    let key = VaultKey::DepositByLedger(depositor.clone(), deposit_id);
+    env.storage().persistent().set(&key, entry);
+    env.storage()
+        .persistent()
+        .extend_ttl(&key, BUMP_THRESHOLD, BUMP_TARGET);
+}
+
+pub fn get_deposit_by_ledger_readonly(env: &Env, depositor: &Address, deposit_id: u32) -> Option<LedgerVaultEntry> {
+    let key = VaultKey::DepositByLedger(depositor.clone(), deposit_id);
+    env.storage().persistent().get(&key)
+}
+
+pub fn remove_deposit_by_ledger(env: &Env, depositor: &Address, deposit_id: u32) {
+    let key = VaultKey::DepositByLedger(depositor.clone(), deposit_id);
     env.storage().persistent().remove(&key);
 }
 
@@ -143,6 +165,7 @@ pub fn set_max_lock_secs(env: &Env, v: u64) {
         .extend_ttl(&VaultKey::MaxLockSecs, BUMP_THRESHOLD, BUMP_TARGET);
 }
 
+/// Returns the runtime-configured max lock duration, or `None` to use the compile-time default.
 pub fn get_max_lock_secs(env: &Env) -> Option<u64> {
     env.storage().persistent().get(&VaultKey::MaxLockSecs)
 }
@@ -151,6 +174,7 @@ pub fn get_max_lock_secs(env: &Env) -> Option<u64> {
 //  Fee recipient helpers
 // ----------------------------------------------------------------
 
+/// Persists the `fee_recipient` address and bumps TTL. Called once during `initialize`.
 pub fn set_fee_recipient(env: &Env, recipient: &Address) {
     env.storage()
         .persistent()

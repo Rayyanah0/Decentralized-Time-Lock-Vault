@@ -1,4 +1,4 @@
-# Contributing
+﻿# Contributing
 
 Thank you for your interest in contributing to the Decentralized Time-Lock Vault!
 
@@ -56,7 +56,7 @@ pub fn some_fn(env: Env, depositor: Address) -> Result<(), VaultError> {
     // ... use `now` again later without re-invoking the host
 }
 
-// bad — calls the host twice for the same value
+// bad â€” calls the host twice for the same value
 pub fn some_fn(env: Env, depositor: Address) -> Result<(), VaultError> {
     if env.ledger().timestamp() < entry.unlock_time {
         return Err(VaultError::FundsStillLocked);
@@ -65,14 +65,15 @@ pub fn some_fn(env: Env, depositor: Address) -> Result<(), VaultError> {
 }
 ```
 
-This convention applies to any repeated host accessor (`env.ledger().sequence()`, `env.current_contract_address()`, etc.) — read once, store locally, reuse the binding.
+This convention applies to any repeated host accessor (`env.ledger().sequence()`, `env.current_contract_address()`, etc.) â€” read once, store locally, reuse the binding.
 
 ## Before Opening a PR
 
 - [ ] `make check` passes locally
 - [ ] New tests added for any new behaviour
 - [ ] README updated if the public API changed
-- [ ] WASM size has not grown unexpectedly (`make optimize` then check artifact size)
+
+- [ ] CHANGELOG.md updated under [Unreleased] with a summary of the change
 
 ## Submitting a PR
 
