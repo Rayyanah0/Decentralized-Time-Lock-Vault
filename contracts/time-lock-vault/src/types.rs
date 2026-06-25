@@ -1,23 +1,16 @@
 use soroban_sdk::{contracttype, Address};
 
-// ----------------------------------------------------------------
-//  Protocol constants
-// ----------------------------------------------------------------
-
 pub const MAX_DEPOSIT_AMOUNT: i128 = 1_000_000_000_000_000;
 pub const MAX_LOCK_DURATION_SECS: u64 = 157_788_000;
 pub const MIN_LOCK_DURATION_SECS: u64 = 60;
-
-// ----------------------------------------------------------------
-//  Storage Keys
-// ----------------------------------------------------------------
+pub const MAX_BATCH_SIZE: u32 = 20;
 
 #[contracttype]
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum VaultKey {
     Deposit(Address, u32),
+    DepositByLedger(Address, u32),
     DepositCounter(Address),
-    DepositIds(Address),
     Admin,
     PendingAdmin,
     Initialized,
@@ -25,11 +18,8 @@ pub enum VaultKey {
     FeeRecipient,
     MaxDeposit,
     MaxLockSecs,
+    Paused,
 }
-
-// ----------------------------------------------------------------
-//  Data Structures
-// ----------------------------------------------------------------
 
 #[contracttype]
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -37,6 +27,16 @@ pub struct VaultEntry {
     pub token: Address,
     pub amount: i128,
     pub unlock_time: u64,
+    pub depositor: Address,
+    pub penalty_bps: u32,
+}
+
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct LedgerVaultEntry {
+    pub token: Address,
+    pub amount: i128,
+    pub unlock_ledger: u32,
     pub depositor: Address,
     pub penalty_bps: u32,
 }
