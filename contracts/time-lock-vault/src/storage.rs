@@ -73,15 +73,26 @@ fn remove_active_deposit_id(env: &Env, depositor: &Address, deposit_id: u32) {
 }
 
 pub fn has_any_deposit(env: &Env, depositor: &Address) -> bool {
-    let counter_key = VaultKey::DepositCounter(depositor.clone());
-    let count: u32 = env.storage().persistent().get(&counter_key).unwrap_or(0);
-    for id in 0..count {
-        let key = VaultKey::Deposit(depositor.clone(), id);
-        if env.storage().persistent().has(&key) {
-            return true;
-        }
-    }
-    false
+    let active_key = VaultKey::ActiveDepositCount(depositor.clone());
+    let active: u32 = env.storage().persistent().get(&active_key).unwrap_or(0);
+    active > 0
+}
+
+/// Increment the active-deposit counter for `depositor`.
+pub fn inc_active_count(env: &Env, depositor: &Address) {
+    let key = VaultKey::ActiveDepositCount(depositor.clone());
+    let count: u32 = env.storage().persistent().get(&key).unwrap_or(0);
+    env.storage().persistent().set(&key, &(count + 1));
+    env.storage().persistent().extend_ttl(&key, BUMP_THRESHOLD, BUMP_TARGET);
+}
+
+/// Decrement the active-deposit counter for `depositor` (saturating at 0).
+pub fn dec_active_count(env: &Env, depositor: &Address) {
+    let key = VaultKey::ActiveDepositCount(depositor.clone());
+    let count: u32 = env.storage().persistent().get(&key).unwrap_or(0);
+    let new_count = count.saturating_sub(1);
+    env.storage().persistent().set(&key, &new_count);
+    env.storage().persistent().extend_ttl(&key, BUMP_THRESHOLD, BUMP_TARGET);
 }
 
 // ----------------------------------------------------------------
