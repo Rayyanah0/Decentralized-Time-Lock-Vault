@@ -7,61 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-### Added
-
-#### Contract Functions
-
-**Core**
-- `deposit_by_ledger(depositor, token, amount, unlock_ledger, penalty_bps) -> u32`  locks tokens until a specific Stellar ledger sequence number is reached; preferred over wall-clock timestamps when deterministic ledger-count unlock is needed
-- `deposit_for(payer, depositor, token, amount, unlock_time, penalty_bps) -> u32`  allows a third-party `payer` to fund a vault on behalf of a `depositor`; useful for vesting and gifting scenarios; blocked when contract is paused
-- `withdraw(depositor, deposit_id)`  now accepts a `deposit_id` and automatically handles both timestamp-based and ledger-based deposit types
-- `withdraw_to(depositor, deposit_id, recipient)`  same as `withdraw` but sends funds to a specified `recipient`; depositor must sign
-- `cancel_deposit(depositor, deposit_id)`  now accepts a `deposit_id` parameter
-
-**Admin**
-- `emergency_withdraw(admin, depositor, deposit_id)`  now accepts a `deposit_id` parameter to target a specific deposit
-- `pause(admin)`  admin-only; blocks new `deposit` and `deposit_for` calls without affecting existing locked funds; emits `paused` event
-- `unpause(admin)`  admin-only; resumes normal deposit operations; emits `unpaused` event
-
-**Read-only Queries**
-- `get_vault_batch(depositors, deposit_id) -> Vec<Option<VaultEntry>>`  batch version of `get_vault`; capped at `MAX_BATCH_SIZE` (20) entries per call
-- `get_deposit_ids(depositor) -> Vec<u32>`  returns all active deposit IDs for a depositor
-- `is_initialized() -> bool`  returns whether `initialize` has been called
-- `is_paused() -> bool`  returns whether the contract is currently paused
-
-#### Events
-
-- `withdraw_to`  emitted when `withdraw_to` sends funds to a non-depositor recipient
-- `adm_xfr_cancel`  emitted when a pending admin transfer is cancelled via `cancel_transfer_admin`
-- `paused`  emitted when admin calls `pause`
-- `unpaused`  emitted when admin calls `unpause`
-- `lock_extended`  emitted when a deposit's unlock time is extended
-
-#### Error Codes
-
-- `ContractPaused` (12)  returned when `deposit` or `deposit_for` is called while the contract is paused
-
-#### Storage Keys
-
-- `VaultKey::DepositByLedger(depositor, id)`  persistent entry for ledger-sequence-based deposits; holds `LedgerVaultEntry`
-- `VaultKey::Paused`  persistent boolean flag set by `pause` / `unpause`; absent means unpaused
-
-#### Types
-
-- `LedgerVaultEntry`  struct for ledger-based deposits: `token: Address`, `amount: i128`, `unlock_ledger: u32`, `depositor: Address`, `penalty_bps: u32`
-
 ### Changed
-
-- `deposit` now returns a `u32` deposit ID and enforces a minimum lock duration (`MIN_LOCK_DURATION_SECS = 60s`)
-- `deposit` and `deposit_for` now fail with `ContractPaused` when the contract is paused
-- `initialize` now accepts a `fee_recipient` parameter
-- Error code 10 is `InvalidAdmin` (was previously unassigned); error code 11 is `LockDurationTooShort`; error code 12 is `ContractPaused` (replaces the former `BatchTooLarge`)
-- `BUMP_TARGET` is now derived from `MAX_LOCK_DURATION_SECS` rather than hardcoded, ensuring TTL always covers the maximum allowed lock duration
-
-### Removed
-
-- `batch_emergency_withdraw`  removed from contract; use `emergency_withdraw` per-deposit ID instead
-- `is_admin`  removed; use `get_admin` and compare the result
+- Documentation clarified current contract behavior for timestamp-based vs ledger-based deposits, pause semantics, and admin recovery.
 
 ## [0.1.0] - 2026-05-31
 
@@ -73,8 +20,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `initialize(admin, fee_recipient, max_deposit, max_lock_secs)`  sets the admin and fee recipient addresses; optionally overrides compile-time limits for `MAX_DEPOSIT_AMOUNT` and `MAX_LOCK_DURATION_SECS`; can only be called once
 
 **Core**
-- `deposit(depositor, token, amount, unlock_time, penalty_bps)`  locks tokens until `unlock_time`; returns a per-depositor `deposit_id`
-- `deposit_for(payer, depositor, token, amount, unlock_time, penalty_bps)`  same as `deposit` but a third-party `payer` funds the vault on behalf of `depositor`
+- `deposit(depositor, token, amount, unlock_time, penalty_bps)`  locks tokens until `unlock_time` (Unix seconds derived from the ledger clock via `env.ledger().timestamp()`); returns a per-depositor `deposit_id`
+- `deposit_for(payer, depositor, token, amount, unlock_time, penalty_bps)`  same as `deposit` but a third-party `payer` funds the vault on behalf of `depositor`; the `payer` must sign the transaction and the depositor's address is stored as the beneficiary
 - `withdraw(depositor, deposit_id)`  returns the full locked amount to the depositor once `unlock_time` has passed
 - `cancel_deposit(depositor, deposit_id)`  early exit before unlock; applies `penalty_bps` penalty sent to `fee_recipient`, remainder returned to depositor
 
@@ -97,6 +44,29 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `get_depositor_count() -> u32`  total number of addresses with an active deposit
 - `get_depositors(offset, limit) -> Vec<Address>`  paginated list of active depositor addresses
 - `is_initialized() -> bool`  whether `initialize` has been called
+
+#### Ledger-Based Deposit Timing
+
+Unlock times are validated and enforced using the **Soroban ledger clock** (`env.ledger().timestamp()`), not wall-clock time. Key implications:
+
+- `unlock_time` must be supplied as a Unix timestamp (seconds since the Unix epoch).
+- The contract reads `env.ledger().timestamp()` once per invocation and caches the value locally to avoid repeated host-function calls.
+- A deposit is accepted only when `unlock_time > now` (strictly future).
+- A `withdraw` succeeds only when `env.ledger().timestamp() >= unlock_time`.
+- Ledger close times on Stellar advance roughly every 5–6 seconds. For short lock durations, callers should account for this granularity when choosing `unlock_time`.
+
+Example — depositing with a 1-hour lock:
+```
+let now: u64 = env.ledger().timestamp(); // e.g. 1_700_000_000
+let one_hour = 3_600_u64;
+contract.deposit(&depositor, &token, &amount, &(now + one_hour), &0_u32);
+```
+
+The `deposit_for` function follows the same ledger-time semantics:
+```
+// payer funds the vault; depositor is the beneficiary
+contract.deposit_for(&payer, &depositor, &token, &amount, &(now + one_hour), &0_u32);
+```
 
 #### Protocol Constants
 
@@ -147,7 +117,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 #### Storage
 
 - All entries use Persistent Storage with TTL bump threshold ~30 days (`518_400` ledgers) and target ~5.2 years (`33_000_000` ledgers)
-- Storage keys: `Admin`, `PendingAdmin`, `Initialized`, `FeeRecipient`, `MaxDeposit`, `MaxLockSecs`, `DepositCounter(depositor)`, `Deposit(depositor, id)`, `DepositorList`
+- Storage keys: `Admin`, `PendingAdmin`, `Initialized`, `FeeRecipient`, `MaxDeposit`, `MaxLockSecs`, `DepositCounter(depositor)`, `Deposit(depositor, id)`, `ActiveDepositIds(depositor)`, `ActiveDepositCount(depositor)`, `DepositorAt(slot)`, `DepositorIndex(depositor)`
 
 #### Infrastructure
 

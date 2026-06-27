@@ -34,10 +34,10 @@ A production-ready Soroban smart contract on the Stellar blockchain that locks X
 
 ## How It Works
 
-The deposit and withdrawal lifecycle:
+The contract supports two independent lock mechanisms:
 
 1. **Deposit** — A user calls `deposit(token, amount, unlock_time)` → tokens transfer from their wallet into the contract
-2. **Storage** — The contract stores a `VaultEntry` in **Persistent Storage** keyed by the depositor's address
+2. **Storage** — The contract stores a `VaultEntry` in **Persistent Storage** keyed by the depositor's address and deposit id
 3. **Verification** — When the user calls `withdraw()`, the contract checks `env.ledger().timestamp() >= unlock_time`
 4. **Unlock** — If the time has passed, tokens are returned. Otherwise the call fails with `FundsStillLocked`
 5. **Admin Recovery** — An admin can perform emergency withdrawals (funds always return to the depositor, never to the admin)
@@ -51,40 +51,60 @@ The deposit and withdrawal lifecycle:
 
 ```
 Depositor
-   â”‚
-   â”œâ”€â–º deposit(token, amount, unlock_time)
-   â”‚       â”‚
-   â”‚       â”œâ”€ validate amount & unlock_time
-   â”‚       â”œâ”€ token.transfer(depositor â†’ contract)
-   â”‚       â”œâ”€ storage::set_deposit(VaultKey::Deposit(depositor) â†’ VaultEntry)
-   â”‚       â””â”€ emit "deposit" event
-   â”‚
-   â””â”€â–º withdraw(depositor)
-           â”‚
-           â”œâ”€ load VaultEntry
-           â”œâ”€ assert now >= unlock_time
-           â”œâ”€ storage::remove_deposit(depositor)   â† state cleared first (CEI)
-           â”œâ”€ token.transfer(contract â†’ depositor)
-           â””â”€ emit "withdraw" event
+   |
+   |-> deposit(depositor, token, amount, unlock_time, penalty_bps)
+   |       |
+   |       |- validate pause / freeze / amount / unlock_time
+   |       |- token.transfer(depositor -> contract)
+   |       |- storage::set_deposit(VaultKey::Deposit(depositor, id))
+   |       `- emit "deposit" event
+   |
+   |-> deposit_by_ledger(depositor, token, amount, unlock_ledger, penalty_bps)
+   |       |
+   |       |- validate pause / freeze / amount / ledger sequence
+   |       |- token.transfer(depositor -> contract)
+   |       |- storage::set_deposit_by_ledger(VaultKey::DepositByLedger(depositor, id))
+   |       `- emit "deposit" event
+   |
+   `-> withdraw(depositor, deposit_id)
+           |
+           |- load VaultEntry or LedgerVaultEntry
+           |- assert unlock condition met (timestamp or ledger sequence)
+           |- storage::remove_deposit*(depositor, id)   <- CEI: state cleared first
+           |- token.transfer(contract -> depositor)
+           `- emit "withdraw" event
 ```
 
 ### Storage Layout
 
 ```
 Persistent Storage
-â”œâ”€â”€ VaultKey::Admin                    â†’ Address
-â”‚       (set once on initialize; removed on renounce_admin)
-â”‚
-â”œâ”€â”€ VaultKey::PendingAdmin             â†’ Address
-â”‚       (set by transfer_admin; cleared by accept_admin / cancel_transfer_admin)
-â”‚
-â””â”€â”€ VaultKey::Deposit(depositor: Address) â†’ VaultEntry
-        â”œâ”€â”€ token:       Address   (SEP-41 token contract)
-        â”œâ”€â”€ amount:      i128      (locked units)
-        â”œâ”€â”€ unlock_time: u64       (Unix seconds)
-        â””â”€â”€ depositor:   Address   (owner; stored for event emission)
+├── VaultKey::Admin                    → Address
+│       (set once on initialize; removed on renounce_admin)
+│
+├── VaultKey::PendingAdmin             → Address
+│       (set by transfer_admin; cleared by accept_admin / cancel_transfer_admin)
+│
+├── VaultKey::Deposit(depositor: Address, deposit_id: u32) → VaultEntry
+│       token:       Address   (SEP-41 token contract)
+│       amount:      i128      (locked units)
+│       unlock_time: u64       (Unix seconds)
+│       depositor:   Address   (owner; stored for event emission)
+│       penalty_bps: u32       (early-exit penalty basis points)
+│
+├── VaultKey::DepositByLedger(depositor: Address, deposit_id: u32) → LedgerVaultEntry
+│       token:         Address
+│       amount:        i128
+│       unlock_ledger: u32
+│       depositor:     Address
+│       penalty_bps:   u32
+│
+├── VaultKey::ActiveDepositIds(depositor: Address) → Vec<u32>
+│       (active deposit ids for a depositor)
+│
+├── VaultKey::ActiveDepositCount(depositor: Address) → u32
+│       (active deposit count for a depositor)
 ```
-
 All entries use TTL bump threshold â‰ˆ 30 days and target â‰ˆ 5.2 years so a max-duration deposit cannot expire before its unlock time.
 
 ---
@@ -111,152 +131,259 @@ All entries use TTL bump threshold â‰ˆ 30 days and target â‰ˆ 5.2 years 
         â”œâ”€â”€ lib.rs          # Crate root & module declarations
         â”œâ”€â”€ contract.rs     # All public entry points
         â”œâ”€â”€ types.rs        # VaultKey, VaultEntry, protocol constants
-        â”œâ”€â”€ errors.rs       # VaultError enum (9 typed codes)
+        â”œâ”€â”€ errors.rs       # VaultError enum (16 typed codes)
         â”œâ”€â”€ events.rs       # Event emission helpers
         â”œâ”€â”€ storage.rs      # Persistent storage helpers + TTL bump logic
-        â””â”€â”€ test.rs         # Full unit test suite (48+ tests)
+        â””â”€â”€ test.rs         # Full unit test suite (60+ tests)
 ```
 
 ---
 
 ## Contract API
 
-### 🔧 Initialization
+### Initialization
 
 #### `initialize(admin, fee_recipient, max_deposit, max_lock_secs)`
-Sets the admin and fee recipient addresses. Optionally overrides the compile-time limits for this deployment. Pass `None` to use the defaults (`10^15` and `5 years`). Must be called once after deployment — always call in the same transaction as `deploy` to prevent front-running.
 
----
-
-### 💰 Core Functions
-
-#### `deposit(depositor, token, amount, unlock_time, penalty_bps) → u32`
-Locks `amount` of `token` until `unlock_time` (Unix seconds). Returns a per-depositor `deposit_id`.
-
-| Param | Type | Constraint |
-|---|---|---|
-| `depositor` | `Address` | Must sign |
-| `token` | `Address` | SEP-41 token contract |
-| `amount` | `i128` | `0 < amount ≤ 10^15` |
-| `unlock_time` | `u64` | `now + 60s ≤ unlock_time ≤ now + 5 years` |
-| `penalty_bps` | `u32` | `0–10000` (basis points for early-exit penalty) |
-
-Fails with `ContractPaused` if the contract is currently paused.
-
-#### `deposit_for(payer, depositor, token, amount, unlock_time, penalty_bps) → u32`
-Same as `deposit` but a third-party `payer` funds the vault on behalf of `depositor`. The `payer` signs and pays the tokens; `depositor` is the beneficiary who can withdraw. Useful for vesting or gifting scenarios.
-
-| Param | Type | Constraint |
-|---|---|---|
-| `payer` | `Address` | Must sign; pays the tokens |
-| `depositor` | `Address` | Beneficiary who can later withdraw |
-| `token` | `Address` | SEP-41 token contract |
-| `amount` | `i128` | `0 < amount ≤ 10^15` |
-| `unlock_time` | `u64` | `now + 60s ≤ unlock_time ≤ now + 5 years` |
-| `penalty_bps` | `u32` | `0–10000` |
-
-Fails with `ContractPaused` if the contract is currently paused.
-
-#### `deposit_by_ledger(depositor, token, amount, unlock_ledger, penalty_bps) → u32`
-Locks `amount` of `token` until Stellar ledger sequence `unlock_ledger` is reached. Use this when a deterministic ledger-count unlock is preferred over a wall-clock timestamp.
-
-| Param | Type | Constraint |
-|---|---|---|
-| `depositor` | `Address` | Must sign |
-| `token` | `Address` | SEP-41 token contract |
-| `amount` | `i128` | `0 < amount ≤ 10^15` |
-| `unlock_ledger` | `u32` | Must be greater than the current ledger sequence |
-| `penalty_bps` | `u32` | `0–10000` |
-
-> **Timestamp vs Ledger**: Use `deposit` when you want a wall-clock expiry (e.g., “unlock in 6 months”). Use `deposit_by_ledger` when you want to lock for a fixed number of ledger-closes (each ~5 seconds). The `withdraw` function automatically detects which type a given `deposit_id` is and applies the correct check.
-
-#### `cancel_deposit(depositor, deposit_id)`
-Cancels an active deposit before the unlock time. The penalty (`penalty_bps` set at deposit time) is sent to the `fee_recipient`; the remainder is returned to the depositor. Fails with `FundsStillLocked` if the vault is already past its unlock time (use `withdraw` instead).
-
-#### `withdraw(depositor, deposit_id)`
-Withdraws the full locked amount for the given `deposit_id`. Works for both timestamp-based (`deposit`) and ledger-based (`deposit_by_ledger`) deposits — the function detects the type automatically. Fails with `FundsStillLocked` if the unlock condition is not yet met.
-
-#### `withdraw_to(depositor, deposit_id, recipient)`
-Same as `withdraw` but sends funds to `recipient` instead of back to `depositor`. The depositor must sign. Only works for timestamp-based deposits.
-
----
-
-### 👨‍⚖️ Admin Functions
-
-#### `emergency_withdraw(admin, depositor, deposit_id)`
-Admin-only. Returns funds for a specific `deposit_id` to the depositor regardless of lock time. Funds always go to the depositor — never to the admin.
-
-#### `pause(admin)`
-Admin-only. Pauses the contract, blocking all new `deposit` and `deposit_for` calls. Existing deposits are unaffected and can still be withdrawn or cancelled. Emits a `paused` event.
-
-#### `unpause(admin)`
-Admin-only. Resumes normal operation after a `pause`. Emits an `unpaused` event.
-
-#### `transfer_admin(admin, new_admin)`
-Step 1 of a two-step admin transfer. Nominates `new_admin` as pending admin.
-
-#### `accept_admin(new_admin)`
-Step 2. The pending admin accepts and becomes the active admin.
-
-#### `cancel_transfer_admin(admin)`
-Cancels a pending admin transfer. Only the current admin can cancel.
-
-#### `renounce_admin(admin)`
-Permanently removes admin privileges. After this call, `emergency_withdraw` and all admin functions are disabled forever. Makes the vault fully trustless.
-
----
-
-### 📖 Read-only Queries
-
-#### `get_vault(depositor, deposit_id) â†’ Option<VaultEntry>`
-Returns the current vault entry. Does **not** bump storage TTL (no extra fees).
-
-#### `time_remaining(depositor, deposit_id) â†’ u64`
-Returns seconds until unlock. Returns `0` if unlocked or no deposit exists. Does **not** bump TTL.
-
-#### `get_time() â†’ u64`
-Returns the current ledger timestamp.
-
-#### `get_admin() â†’ Option<Address>`
-Returns the current admin, or `None` if renounced.
-
-#### `get_pending_admin() â†’ Option<Address>`
-Returns the pending admin during a transfer, or `None`.
-
-#### `is_admin(address) â†’ bool`
-Returns `true` if `address` is the current admin. Returns `false` if admin has been renounced.
-
-#### `get_fee_recipient() â†’ Option<Address>`
-Returns the fee recipient address set at initialization.
-
-#### `get_constants() â†’ (i128, u64)`
-Returns the effective `(MAX_DEPOSIT_AMOUNT, MAX_LOCK_DURATION_SECS)` for this deployment â€” runtime-configured values if set at `initialize`, otherwise the compile-time defaults.
-
-#### `get_depositor_count() â†’ u32`
-Returns the total number of addresses with an active deposit.
-
-#### `get_depositors(offset: u32, limit: u32) â†’ Vec<Address>`
-Returns a paginated slice of active depositor addresses.
+Sets the admin and fee-recipient addresses. Optionally overrides compile-time limits. Must be called once after deployment.
 
 | Param | Type | Description |
 |---|---|---|
-| `offset` | `u32` | Zero-based start index |
-| `limit` | `u32` | Maximum number of addresses to return |
+| `admin` | `Address` | Contract administrator |
+| `fee_recipient` | `Address` | Receives early-exit penalty fees |
+| `max_deposit` | `Option<i128>` | Override max deposit amount; `None` uses default (10^15) |
+| `max_lock_secs` | `Option<u64>` | Override max lock duration; `None` uses default (5 years) |
 
-Use `offset=0, limit=N` for the first page, then increment `offset` by `N` for subsequent pages.
+---
 
-#### `get_vault_batch(depositors, deposit_id) → Vec<Option<VaultEntry>>`
-Batch version of `get_vault`. Returns one `Option<VaultEntry>` per address in the input list. Capped at `MAX_BATCH_SIZE` (20) entries per call.
+### Core Functions
 
-#### `get_deposit_ids(depositor) → Vec<u32>`
-Returns all active `deposit_id` values for a depositor. Use this to enumerate all of a depositor's current vaults before calling `withdraw` or `cancel_deposit`.
+#### `deposit(depositor, token, amount, unlock_time, penalty_bps) -> u32`
 
-#### `is_initialized() → bool`
-Returns `true` if `initialize` has been called. Useful to verify a freshly deployed contract before interacting with it.
+#### `deposit(depositor, token, amount, unlock_time, penalty_bps)`
+Locks `amount` of `token` until `unlock_time` (Unix seconds) and returns a unique `deposit_id` for the depositor.
 
-#### `is_paused() → bool`
-Returns `true` if the contract is currently paused. New deposits are blocked when paused; existing withdrawals are unaffected.
+| Param | Type | Constraint |
+|---|---|---|
+| `depositor` | `Address` | Must sign |
+| `token` | `Address` | SEP-41 token contract |
+| `amount` | `i128` | `0 < amount <= 10^15` |
+| `unlock_time` | `u64` | `now + 60s < unlock_time <= now + 5 years` |
+| `penalty_bps` | `u32` | `0-10000` (basis points for early-exit penalty) |
 
+Each depositor can create multiple active deposits. The returned `deposit_id` must be used for later `withdraw`, `cancel_deposit`, or `get_vault` calls.
+
+#### `deposit_for(payer, depositor, token, amount, unlock_time, penalty_bps)`
+Locks `amount` of `token` on behalf of `depositor`. The authenticated `payer` funds the deposit, while `depositor` remains the beneficiary.
+
+Same as `deposit` but unlocks at `unlock_ledger` (ledger sequence number) instead of a Unix timestamp. Returns a `deposit_id`. Subject to the same pause/freeze and amount/penalty validations.
+
+| Param | Type | Constraint |
+|---|---|---|
+| `depositor` | `Address` | Must sign |
+| `token` | `Address` | SEP-41 token contract |
+| `amount` | `i128` | `0 < amount <= 10^15` |
+| `unlock_ledger` | `u32` | `current + min_ledgers < unlock_ledger <= current + max_ledgers` |
+| `penalty_bps` | `u32` | `0-10000` |
+
+Ledger duration bounds are derived from the same `MIN_LOCK_DURATION_SECS` / `MAX_LOCK_DURATION_SECS` limits using `LEDGER_SECONDS = 5`.
+
+#### `deposit_for(payer, depositor, token, amount, unlock_time, penalty_bps) -> u32`
+
+Identical to `deposit` but the `payer` transfers the tokens and `depositor` receives the vault entry. `payer` must sign; `depositor` does not need to be present.
+
+#### `withdraw(depositor, deposit_id)`
+
+Withdraws funds if the unlock condition is met. Works for both timestamp and ledger deposits. Blocked while the depositor is frozen.
+
+#### `withdraw_to(depositor, deposit_id, recipient)`
+
+Same as `withdraw` but transfers funds to `recipient` instead of `depositor`. Useful for routing unlocked funds directly to a different address.
+
+#### `cancel_deposit(depositor, deposit_id)`
+
+Cancels an active deposit before its unlock time. The `penalty_bps` fraction goes to the `fee_recipient`; the remainder is returned to the depositor. Blocked while the depositor is frozen. Fails with `FundsAlreadyUnlocked` if the vault is past its unlock time (use `withdraw` instead).
+
+| Param | Type | Constraint |
+|---|---|---|
+| `depositor` | `Address` | Must sign |
+| `token` | `Address` | SEP-41 token contract |
+| `amount` | `i128` | `0 < amount ≤ 10^15` |
+| `unlock_ledger` | `u32` | `current_ledger < unlock_ledger` |
+| `penalty_bps` | `u32` | `0–10000` |
+
+### Admin Functions
+
+#### `emergency_withdraw(admin, depositor, deposit_id)`
+
+Admin-only. Returns funds to the depositor regardless of lock time. Works for both timestamp and ledger deposits. Funds always go to the depositor — never to the admin. Works even when the depositor is frozen.
+
+#### `batch_emergency_withdraw(admin, depositors) -> Vec<WithdrawResult>`
+
+Admin-only. Processes emergency withdrawals for multiple `(depositor, deposit_id)` pairs in one transaction.
+
+| Param | Type | Description |
+|---|---|---|
+| `admin` | `Address` | Must be the current admin |
+| `depositors` | `Vec<(Address, u32)>` | `(depositor, deposit_id)` pairs. Max `MAX_BATCH_SIZE` (20) entries |
+
+Returns `Vec<WithdrawResult>` — one entry per input pair:
+
+| Field | Type | Meaning |
+|---|---|---|
+| `depositor` | `Address` | The input address |
+| `deposit_id` | `u32` | The input deposit ID |
+| `success` | `bool` | `true` = funds transferred; `false` = no deposit found, skipped |
+
+#### `pause(admin)` / `unpause(admin)`
+
+Pauses or resumes the contract. While paused, `deposit` and `deposit_by_ledger` fail with `ContractPaused`. Withdrawals, cancellations, and emergency withdrawals still work.
+
+#### `freeze_depositor(admin, depositor)` / `unfreeze_depositor(admin, depositor)`
+
+Freezes or unfreezes a specific depositor. While frozen, the depositor cannot call `deposit`, `deposit_by_ledger`, `withdraw`, `withdraw_to`, or `cancel_deposit`. Emergency withdrawal by the admin is still allowed.
+
+#### `migrate_deposit_to_ledger(admin, depositor, deposit_id, new_unlock_ledger)`
+
+Admin-only. Converts an existing timestamp-based deposit to a ledger-sequence deposit.
+
+#### `migrate_deposit_to_time(admin, depositor, deposit_id, new_unlock_time)`
+
+Admin-only. Converts an existing ledger-sequence deposit to a timestamp-based deposit.
+
+#### `transfer_admin(admin, new_admin)`
+
+Step 1 of a two-step admin transfer. Nominates `new_admin` as pending admin.
+
+#### `accept_admin(new_admin)`
+
+Step 2. The pending admin accepts and becomes the active admin.
+
+#### `cancel_transfer_admin(admin)`
+
+Cancels a pending admin transfer. Only the current admin can cancel.
+
+#### `renounce_admin(admin)`
+
+Permanently removes admin privileges. After this call, all admin functions are disabled forever.
+
+#### `freeze_depositor(admin, depositor)` — emergency freeze (#331)
+Admin-only. Blocks `depositor` from making new deposits and from calling `withdraw`. Use `emergency_withdraw` to return their funds while frozen.
+
+#### `unfreeze_depositor(admin, depositor)` — (#331)
+Admin-only. Lifts the freeze on `depositor`.
+
+#### `is_depositor_frozen(depositor) → bool`
+Returns `true` if the depositor is currently frozen.
+
+#### `freeze_token(admin, token)` — emergency freeze (#331)
+Admin-only. Prevents **new deposits** of the specified token contract address. Existing deposits are unaffected and can still be withdrawn normally.
+
+```
+# Example: block new USDC deposits after a security incident
+freeze_token(admin=ADMIN_ADDR, token=USDC_CONTRACT)
+```
+
+#### `unfreeze_token(admin, token)` — (#331)
+Admin-only. Re-enables deposits for a previously frozen token.
+
+#### `is_token_frozen(token) → bool`
+Returns `true` if new deposits of this token are blocked.
+
+#### `set_max_penalty_bps(admin, bps)` — penalty cap (#332)
+Admin-only. Sets the global upper bound on `penalty_bps` for new deposits (0–10000).
+Any deposit whose `penalty_bps` exceeds this value is rejected with `InvalidPenaltyBps`.
+Pass `10000` to effectively remove the cap.
+
+```
+# Restrict all new deposits to a maximum 20% early-exit penalty
+set_max_penalty_bps(admin=ADMIN_ADDR, bps=2000)
+```
+
+#### `get_max_penalty_bps() → Option<u32>` — (#332)
+Returns the configured penalty cap in basis points, or `None` if unset (defaults to 10000).
+
+#### `set_min_cancel_fee(admin, fee)` — minimum cancel fee (#332)
+Admin-only. Sets a minimum flat fee (in token units) charged on every `cancel_deposit` call.
+Effective penalty = `max(bps_penalty, min_cancel_fee)`, capped at the full deposit amount.
+Set to `0` to disable.
+
+```
+# Require at least 100 stroops fee on every early cancellation
+set_min_cancel_fee(admin=ADMIN_ADDR, fee=100)
+```
+
+#### `get_min_cancel_fee() → Option<i128>` — (#332)
+Returns the configured minimum cancel fee, or `None` if unset (defaults to 0).
+
+---
+
+### Read-only Queries
+
+#### `get_vault(depositor, deposit_id) -> Option<VaultEntry>`
+
+Returns the timestamp-based vault entry. Does **not** bump storage TTL.
+
+#### `get_vault_by_ledger(depositor, deposit_id) -> Option<LedgerVaultEntry>`
+
+Returns the ledger-based vault entry. Does **not** bump TTL.
+
+#### `get_vault_batch(depositors, deposit_id) -> Vec<Option<VaultEntry>>`
+
+Returns timestamp entries for multiple depositors at once (max 20).
+
+#### `get_deposit_ids(depositor) -> Vec<u32>`
+
+#### `get_vault(depositor, deposit_id) â†’ Option<VaultEntry>`
+Returns the current vault entry for the given `deposit_id`. Does **not** bump storage TTL (no extra fees).
+
+#### `time_remaining(depositor, deposit_id) -> u64`
+
+Returns seconds until unlock for either deposit type. For ledger deposits, remaining ledgers are converted using `LEDGER_SECONDS = 5`. Returns `0` if unlocked or not found.
+
+#### `ledgers_remaining(depositor, deposit_id) -> u32`
+
+Returns remaining ledgers for a ledger-based deposit. Returns `0` if unlocked or not found.
+
+#### `get_time() -> u64`
+
+Returns the current ledger timestamp.
+
+#### `get_admin() -> Option<Address>`
+
+Returns the current admin, or `None` if renounced.
+
+#### `get_pending_admin() -> Option<Address>`
+
+Returns the pending admin during a transfer, or `None`.
+
+#### `get_fee_recipient() -> Option<Address>`
+
+Returns the fee recipient address.
+
+#### `get_constants() -> (i128, u64)`
+
+Returns the effective `(MAX_DEPOSIT_AMOUNT, MAX_LOCK_DURATION_SECS)` for this deployment.
+
+#### `get_depositor_count() -> u32`
+
+Returns the number of addresses with at least one active deposit.
+
+#### `get_depositors(offset, limit) -> Vec<Address>`
+
+Returns a paginated slice of active depositor addresses. `limit` is capped at 100.
+
+#### `is_paused() -> bool`
+
+Returns `true` if the contract is currently paused.
+
+#### `is_depositor_frozen(depositor) -> bool`
+
+Returns `true` if the depositor is currently frozen.
+
+#### `is_initialized() -> bool`
+
+Returns `true` if `initialize` has been called.
 ---
 
 ## 📋 Events
@@ -265,11 +392,16 @@ All events are emitted via `env.events().publish(topics, data)`.
 
 | Event | Topics | Data |
 |---|---|---|
-| `deposit` | `("deposit", depositor, token)` | `(amount, unlock_time)` |
-| `withdraw` | `("withdraw", depositor, token)` | `amount` |
-| `withdraw_to` | `("withdraw_to", depositor, recipient, token)` | `amount` |
-| `emrg_wdraw` | `("emrg_wdraw", depositor)` | `(admin, token, amount)` |
+| `deposit` | `("deposit", depositor, token)` | `(deposit_id, amount, unlock_time)` |
+| `withdraw` | `("withdraw", depositor, token)` | `(deposit_id, amount)` |
+| `withdraw_to` | `("withdraw_to", depositor, recipient, token)` | `(deposit_id, amount)` |
+| `emrg_wdraw` | `("emrg_wdraw", depositor)` | `(deposit_id, admin, token, amount)` |
 | `dep_cancel` | `("dep_cancel", depositor, token)` | `(amount, penalty)` |
+| `paused` | `("paused", admin)` | `()` |
+| `unpaused` | `("unpaused", admin)` | `()` |
+| `frozen` | `("frozen", admin, depositor)` | `()` |
+| `unfrozen` | `("unfrozen", admin, depositor)` | `()` |
+| `migrated` | `("migrated", depositor)` | `(deposit_id, to_ledger, to_time)` |
 | `adm_xfr_init` | `("adm_xfr_init", current_admin)` | `pending_admin` |
 | `adm_xfr_cancel` | `("adm_xfr_cancel", current_admin)` | `pending_admin` |
 | `adm_xfr_done` | `("adm_xfr_done", new_admin)` | `()` |
@@ -278,8 +410,7 @@ All events are emitted via `env.events().publish(topics, data)`.
 | `unpaused` | `("unpaused", admin)` | `()` |
 | `lock_extended` | `("lock_extended", depositor)` | `(old_unlock_time, new_unlock_time)` |
 
-All `amount` and `penalty` values are `i128` token units. `deposit_id` is a `u32` per-depositor sequence number. The `admin` address is placed in event data (not topics) on `emrg_wdraw` to avoid leaking it in the publicly-indexed topic stream. The `admin` address is placed in event data (not topics) on `emrg_wdraw` to avoid leaking it in the publicly-indexed topic stream.
-
+All `amount` and `penalty` values are `i128` token units. `deposit_id` is a `u32` per-depositor sequence number. For `deposit_by_ledger`, the `unlock_time` field in the `deposit` event carries `unlock_ledger` cast to `u64`.
 ---
 
 ## 🗄️ Storage Layout
@@ -295,10 +426,11 @@ All entries use **Persistent Storage** with TTL bump threshold â‰ˆ 30 days (
 | `VaultKey::MaxDeposit` | `i128` | Set on `initialize` if overridden; absent means use compile-time default |
 | `VaultKey::MaxLockSecs` | `u64` | Set on `initialize` if overridden; absent means use compile-time default |
 | `VaultKey::DepositCounter(depositor)` | `u32` | Incremented on each `deposit`; never decremented |
-| `VaultKey::Deposit(depositor, id)` | `VaultEntry` | Created on `deposit` / `deposit_for`; removed on `withdraw` / `emergency_withdraw` / `cancel_deposit` |
-| `VaultKey::DepositByLedger(depositor, id)` | `LedgerVaultEntry` | Created on `deposit_by_ledger`; removed on `withdraw` |
-| `VaultKey::DepositorList` | `Vec<Address>` | Updated on `deposit` and `withdraw` |
-| `VaultKey::Paused` | `bool` | Set by `pause` / `unpause`; absent means unpaused |
+| `VaultKey::Deposit(depositor, id)` | `VaultEntry` | Created on `deposit`; removed on `withdraw` / `emergency_withdraw` / `cancel_deposit` |
+| `VaultKey::ActiveDepositIds(depositor)` | `Vec<u32>` | Active deposit IDs for a depositor |
+| `VaultKey::ActiveDepositCount(depositor)` | `u32` | Active deposit count for a depositor |
+| `VaultKey::DepositorAt(slot)` | `Address` | Depositor index used for pagination |
+| `VaultKey::DepositorIndex(depositor)` | `u32` | Slot index for an active depositor |
 
 `VaultEntry` fields: `token: Address`, `amount: i128`, `unlock_time: u64`, `depositor: Address`, `penalty_bps: u32`.
 
@@ -316,14 +448,18 @@ TTL is bumped on every **write**. Read-only query functions (`get_vault`, `time_
 | 2 | `UnlockTimeNotInFuture` | `unlock_time` â‰¤ current ledger time |
 | 3 | `NoDepositFound` | No active deposit for this address |
 | 4 | `FundsStillLocked` | Lock period not yet expired |
-| 5 | `DepositAlreadyExists` | Must withdraw before re-depositing |
+| 5 | `DepositAlreadyExists` | Reserved error code |
 | 6 | `LockDurationTooLong` | Lock period exceeds 5 years |
 | 7 | `Unauthorized` | Caller is not the admin |
 | 8 | `AmountTooLarge` | Amount exceeds 10^15 |
 | 9 | `InvalidPenaltyBps` | `penalty_bps` > 10000 |
-| 10 | `InvalidAdmin` | Nominated admin is the same as the current admin |
-| 11 | `LockDurationTooShort` | Lock period is shorter than the minimum (60 s) |
-| 12 | `ContractPaused` | `deposit` or `deposit_for` called while the contract is paused |
+| 10 | `LockDurationTooShort` | Lock period is shorter than the minimum (60 s) |
+| 11 | `InvalidAdmin` | Nominated admin is the same as the current admin |
+| 12 | `BatchTooLarge` | `depositors.len()` exceeds `MAX_BATCH_SIZE` (25) |
+| 13 | `FundsAlreadyUnlocked` | Funds are already past unlock time; use `withdraw` |
+| 14 | `DepositorFrozen` | Depositor is frozen; contact admin |
+| 15 | `MigrationNotAllowed` | Migration precondition failed |
+| 16 | `TokenFrozen` | Token is frozen; new deposits blocked (#331) |
 
 ---
 
@@ -402,13 +538,27 @@ make test
 make check
 ```
 
-### 🛡️ Security audit
+### 🛡️ Security audit (CI + local)
+
+The CI pipeline runs `cargo audit` on every push and pull request via the `security-audit` job
+in `.github/workflows/ci.yml` (using `rustsec/audit-check`). This checks all dependencies
+against the [RustSec Advisory Database](https://rustsec.org/) and fails the build if any
+known-vulnerable dependency is detected.
+
+Run the same check locally:
 
 ```bash
 make audit
+# or directly:
+cargo audit
 ```
 
-Runs `cargo audit` to check all dependencies against the [RustSec Advisory Database](https://rustsec.org/).
+`cargo-audit` is installed automatically as part of `make check` (which mirrors the full CI
+pipeline: `fmt-check → lint → test → audit → deny`).
+
+**GitHub Release WASM builds** — pushing a version tag (`v*`) also triggers
+`.github/workflows/release.yml`, which builds an optimized WASM binary and attaches it to the
+GitHub Release as `time_lock_vault.optimized.wasm`.
 
 ### 📦 License & dependency policy
 
