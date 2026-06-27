@@ -406,6 +406,9 @@ All events are emitted via `env.events().publish(topics, data)`.
 | `adm_xfr_cancel` | `("adm_xfr_cancel", current_admin)` | `pending_admin` |
 | `adm_xfr_done` | `("adm_xfr_done", new_admin)` | `()` |
 | `adm_renounce` | `("adm_renounce", former_admin)` | `()` |
+| `paused` | `("paused", admin)` | `()` |
+| `unpaused` | `("unpaused", admin)` | `()` |
+| `lock_extended` | `("lock_extended", depositor)` | `(old_unlock_time, new_unlock_time)` |
 
 All `amount` and `penalty` values are `i128` token units. `deposit_id` is a `u32` per-depositor sequence number. For `deposit_by_ledger`, the `unlock_time` field in the `deposit` event carries `unlock_ledger` cast to `u64`.
 ---
@@ -430,6 +433,8 @@ All entries use **Persistent Storage** with TTL bump threshold â‰ˆ 30 days (
 | `VaultKey::DepositorIndex(depositor)` | `u32` | Slot index for an active depositor |
 
 `VaultEntry` fields: `token: Address`, `amount: i128`, `unlock_time: u64`, `depositor: Address`, `penalty_bps: u32`.
+
+`LedgerVaultEntry` fields: `token: Address`, `amount: i128`, `unlock_ledger: u32`, `depositor: Address`, `penalty_bps: u32`.
 
 TTL is bumped on every **write**. Read-only query functions (`get_vault`, `time_remaining`, `get_time`) skip the TTL bump to avoid charging callers extra fees.
 
@@ -469,7 +474,9 @@ TTL is bumped on every **write**. Read-only query functions (`get_vault`, `time_
 | No admin fund theft | Emergency withdraw always sends to depositor, never to admin |
 | Trustless mode | Admin can permanently renounce via `renounce_admin()` |
 | Safe admin transfer | Two-step transfer prevents accidental key loss |
-| TTL management | Persistent entries bumped to ~1 year on every write; view functions skip TTL bump |
+| Pause mechanism | Admin can pause new deposits via `pause()` without affecting existing locked funds; `unpause()` resumes normal operation |
+| Pause mechanism | Admin can pause new deposits via `pause()` without affecting existing locked funds; `unpause()` resumes normal operation |
+| TTL management | Persistent entries bumped to ~5.2 years on every write; view functions skip TTL bump |
 | No testutils in production | `features = ["testutils"]` only in `[dev-dependencies]` |
 | Initialize front-running | `initialize()` has no on-chain guard against a race: an attacker who observes the deploy transaction in the mempool can call `initialize` first with their own address. **Mitigation:** always call `initialize` in the same transaction as `deploy` (atomic deploy+init) so no intermediate state is visible. The deploy script does this by default. |
 
