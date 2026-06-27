@@ -6,14 +6,35 @@ pub enum VaultKey {
     Deposit(Address, u32),
     DepositByLedger(Address, u32),
     DepositCounter(Address),
+    ActiveDepositIds(Address),
+    ActiveDepositCount(Address),
     Admin,
+    /// Pending admin during a two-step transfer
     PendingAdmin,
     Initialized,
-    DepositorList,
+    DepositorMember(Address),
+    DepositorCount,
+    DepositorAt(u32),
+    DepositorIndex(Address),
     FeeRecipient,
     MaxDeposit,
     MaxLockSecs,
+    /// Flag indicating whether deposits are paused
     Paused,
+}
+
+// ----------------------------------------------------------------
+//  Data Structures
+// ----------------------------------------------------------------
+
+/// Represents a single vault deposit.
+/// The depositor address is not stored here — it is already the storage key
+/// (VaultKey::Deposit(Address, u32)), so duplicating it wastes persistent storage.
+    Paused,
+    DepositorFrozen(Address),
+    TokenFrozen(Address),
+    MaxPenaltyBps,
+    MinCancelFee,
 }
 
 #[contracttype]
@@ -34,4 +55,12 @@ pub struct LedgerVaultEntry {
     pub unlock_ledger: u32,
     pub depositor: Address,
     pub penalty_bps: u32,
+}
+
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct WithdrawResult {
+    pub depositor: Address,
+    pub deposit_id: u32,
+    pub success: bool,
 }
